@@ -1,0 +1,17 @@
+# Build output
+/cgrab
+/cgrab.exe
+*.o
+*.out
+*.dSYM/
+core
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
