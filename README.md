@@ -2,22 +2,20 @@
 
 Miniature program that prints special comments `# !`, `// !` from source code files, including line numbers. Supports most languages.
 
-I personally find this most useful for learning syntax and keeping track of pseudocode in larger codebases.
+I personally find this most useful for learning new syntax and keeping track of pseudocode in larger codebases.
 
 I suggest using `!!`, `!!!`... for sub-bullets.
-
 
 ## Build
 
 ```
 gcc -o cgrab main.c
 ```
-
 ## Usage
 
 ```
 ./cgrab # all files in the current directory + subdirs
-./cgrab test # all files in a directory + its subdirs
+./cgrab test # all files in this directory + subdirs
 ./cgrab main.c test/dataclasses.py # individual files
 ```
 

@@ -4,60 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
-#define MH_MAGIC_32 "\xce\xfa\xed\xfe"
-#define MH_MAGIC_64 "\xcf\xfa\xed\xfe"
-
-char *lstrip(const char *str) {
-  if (str == NULL)
-    return NULL;
-  while (*str && isspace((unsigned char)*str))
-    str++;
-  return (char *)str;
-}
-
-int has_prefix(const char *a, const char *b) {
-  // ! strncmp(): compare the first n characters of strings a and b
-  return strncmp(a, b, strlen(b)) == 0;
-}
-
-static const char *basename_of(const char *path) {
-  // ! strrchr() to find the last occurrence of a character
-  // ! strchr() for first occurence
-  const char *slash = strrchr(path, '/');
-  return slash ? slash + 1 : path;
-}
-
-int starts_with_period(const char *path) {
-  const char *name = basename_of(path);
-
-  if (name[0] == '.')
-    return 1;
-  return 0;
-}
-
-int is_binary_executable(FILE *fp) {
-  unsigned char header_bytes[4];
-
-  // ! fread(<memory block to store read data>, <no. of bytes/element>, <no. of elements>, <pointer to FILE object>)
-  // !! basically move a "cursor" (up to) 4 bytes to the right, once
-  // !! and copy said 4 bytes into header_bytes
-  size_t header_bytes_read = fread(header_bytes, 1, 4, fp);
-
-  // ! rewind cursor back to the start; clear EOF/error flags
-  rewind(fp);
-
-  if (header_bytes_read < 4)
-    return 0;
-  if (header_bytes[0] == 0x7f && header_bytes[1] == 'E' &&
-      header_bytes[2] == 'L' && header_bytes[3] == 'F') // Linux/ELF
-    return 1;
-  // ! memcmp(<pointer to block A>, <pointer to block B>, <no. of bytes for comparison>)
-  // !! C handles the * for functions like this
-  if (memcmp(header_bytes, MH_MAGIC_32, 4) == 0 ||
-      memcmp(header_bytes, MH_MAGIC_64, 4) == 0) // macOS
-    return 1;
-  return 0;
-}
 
 typedef struct CommentStyle {
   const char *comment_marker;
@@ -81,6 +27,36 @@ static const CommentStyle styles[] = {
 
 // ! sizeof <total array size in bytes> / sizeof <size of one item in bytes>
 static const size_t n_styles = sizeof styles / sizeof styles[0];
+
+// set in main() when the output file ends in .md
+static int markdown_output = 0;
+
+char *lstrip(const char *str) {
+  if (str == NULL)
+    return NULL;
+  while (*str && isspace((unsigned char)*str))
+    str++;
+  return (char *)str;
+}
+
+int has_prefix(const char *a, const char *b) {
+  // ! strncmp(): compare the first n characters of strings a and b
+  return strncmp(a, b, strlen(b)) == 0;
+}
+
+static const char *basename_of(const char *path) {
+  // ! strrchr() to find the last occurrence of a character
+  // ! strchr() for first occurence
+  const char *slash = strrchr(path, '/');
+  return slash ? slash + 1 : path;
+}
+
+int starts_with_period(const char *path) {
+  const char *name = basename_of(path);
+  if (name[0] == '.')
+    return 1;
+  return 0;
+}
 
 static const char *comment_prefix_for(const char *path) {
   const char *dot = strrchr(basename_of(path), '.');
@@ -107,10 +83,6 @@ void cat_comment_helper(const char *path) {
   fp = fopen(path, "r");
   if (!fp) {
     perror(path);
-    return;
-  }
-  if (is_binary_executable(fp)) {
-    fclose(fp);
     return;
   }
 
