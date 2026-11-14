@@ -1,5 +1,6 @@
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,9 @@ static int markdown_output = 0;
 // how many files have had comments written so far; used to put a blank line
 // between files without leaving an extra one at the end of the output
 static int written_files = 0;
+
+// set whenever a path can't be read, so main() can exit with an error code
+static int path_error = 0;
 
 char *lstrip(const char *str) {
   if (str == NULL)
@@ -77,6 +81,7 @@ static const char *comment_prefix_for(const char *path) {
 }
 
 void cat_comment_helper(const char *path, FILE *output_file) {
+  size_t n_comments = 0;
   const char *prefix = comment_prefix_for(path);
   if (!prefix)
     return;
@@ -84,6 +89,7 @@ void cat_comment_helper(const char *path, FILE *output_file) {
   FILE *fp = fopen(path, "r");
   if (!fp) {
     perror(path);
+    path_error = 1;
     return;
   }
 
@@ -95,36 +101,37 @@ void cat_comment_helper(const char *path, FILE *output_file) {
   size_t len = 0;
   ssize_t read;
   size_t current_line = 1;
-  int found = 0;
   while ((read = getline(&line, &len, fp)) != -1) {
     const char *stripped_line = lstrip(line);
     if (has_prefix(stripped_line, prefix)) {
       // only include files with valid comments
-      if (!found) {
+      if (n_comments == 0) {
         if (written_files > 0) {
-          printf("\n");
           fprintf(output_file, "\n");
         }
         written_files++;
 
-        printf("====== %s ======\n", name);
         if (markdown_output)
           fprintf(output_file, "### %s\n```\n", name);
         else
           fprintf(output_file, "====== %s ======\n", name);
-        found = 1;
       }
 
       // don't allow files to end with '\n'
       const char *newline = line[read - 1] == '\n' ? "" : "\n";
-      printf("[%zu] %s%s", current_line, stripped_line, newline);
       fprintf(output_file, "[%zu] %s%s", current_line, stripped_line, newline);
+      n_comments++;
     }
     current_line++;
   }
 
-  if (found && markdown_output)
-    fprintf(output_file, "```\n");
+  if (n_comments > 0) {
+    if (markdown_output)
+      fprintf(output_file, "```\n");
+    printf("Extracted %zu comment%s: %s\n", n_comments, n_comments == 1 ? "" : "s", name);
+  } else {
+    printf("No comments found: %s\n", name);
+  }
 
   free(line);
   fclose(fp);
@@ -140,11 +147,14 @@ void cat_comments(const char *input_path, FILE *output_file) {
   struct stat path_stat;
   if (lstat(input_path, &path_stat)) {
     perror(input_path);
+    path_error = 1;
     return;
   }
 
   if (!S_ISDIR(path_stat.st_mode)) {
-    cat_comment_helper(input_path, output_file);
+    struct stat target_stat;
+    if (stat(input_path, &target_stat) == 0 && S_ISREG(target_stat.st_mode))
+      cat_comment_helper(input_path, output_file);
     return;
   }
 
@@ -154,19 +164,23 @@ void cat_comments(const char *input_path, FILE *output_file) {
   int n = scandir(input_path, &entries, NULL, alphasort);
   if (n < 0) {
     perror(input_path);
+    path_error = 1;
     return;
   }
+
+  // avoid "test//file.py" if the path is inputted as "test/"
+  const char *sep = input_path[strlen(input_path) - 1] == '/' ? "" : "/";
 
   // recursion over subfolders
   for (int i = 0; i < n; i++) {
     // ! (*entries[i]).d_name
     const char *name = entries[i]->d_name;
     if (!starts_with_period(name)) {
-      size_t len = strlen(input_path) + strlen(name) + 2;
+      size_t len = strlen(input_path) + strlen(sep) + strlen(name) + 1;
       char sub_path[len];
 
       // ! snprintf: string buffer
-      snprintf(sub_path, len, "%s/%s", input_path, name);
+      snprintf(sub_path, len, "%s%s%s", input_path, sep, name);
 
       // cat_comments checks for itself whether sub_path is a file or folder
       cat_comments(sub_path, output_file);
@@ -178,43 +192,66 @@ void cat_comments(const char *input_path, FILE *output_file) {
 }
 
 int main(int argc, char *argv[]) {
-  char output_path[256];
-  printf("Save to (.txt OR .md): ");
+  char input[256];
+  char *output_path;
+  const char *out_ext;
+  FILE *output_file;
 
-  // ! scanf(): write stdin to variable
-  if (scanf("%255s", output_path) != 1) {
-    printf("Error: no file name given\n");
-    return 1;
-  }
+  // keep asking until a valid file name is given and the file is created
+  while (1) {
+    printf("Save to (.txt OR .md): ");
+    fflush(stdout);
 
-  // ! scanf stops after 255 chars
-  int next = getchar();
-  if (next != EOF && !isspace(next)) {
-    printf("Error: file name cannot exceed 255 characters\n");
-    return 1;
-  }
-  
-  const char *out_ext = strrchr(basename_of(output_path), '.');
+    // ! fgets(): read one line (including '\n'), NULL on EOF (Ctrl+D)
+    if (fgets(input, sizeof(input), stdin) == NULL) {
+      printf("\nError: no file name given\n");
+      return 1;
+    }
 
-  // check strrchr returning NULL if there's no '.'
-  // ! strcasecmp: 0 = match
-  if (!out_ext || (strcasecmp(out_ext, ".txt") != 0 && strcasecmp(out_ext, ".md") != 0)) {
-    printf("Error: Invalid file extension\n");
-    return 1;
-  }
+    // ! strcspn(): index of the first '\n'
+    size_t len = strcspn(input, "\n");
+    // ! feof(): is it file EOF?
+    if (input[len] != '\n' && !feof(stdin)) {
+      int c;
+      while ((c = getchar()) != '\n' && c != EOF)
+        ; // discard the rest of the line
+      printf("Error: file name cannot exceed %zu characters\n", sizeof(input) - 2);
+      continue;
+    }
+    input[len] = '\0';
 
-  FILE *output_file = fopen(output_path, "r");
-  if (output_file) {
-    printf("Error: Output file '%s' already exists\n", output_path);
-    fclose(output_file);
-    return 1;
-  }
+    output_path = lstrip(input);
+    char *end = output_path + strlen(output_path);
+    while (end > output_path && isspace((unsigned char)end[-1]))
+      // decrement before using end variable
+      *--end = '\0';
 
-  // ! reopen in append mode
-  output_file = fopen(output_path, "a");
-  if (!output_file) {
-    perror(output_path);
-    return 1;
+    if (*output_path == '\0') {
+      printf("Please provide a file name\n");
+      continue;
+    }
+
+    out_ext = strrchr(basename_of(output_path), '.');
+
+    // check strrchr returning NULL if there's no '.'
+    // ! strcasecmp(): 0 = match
+    if (!out_ext || (strcasecmp(out_ext, ".txt") != 0 &&
+                     strcasecmp(out_ext, ".md") != 0)) {
+      printf("Error: Invalid file extension\n");
+      continue;
+    }
+
+    // ! "wx": create for writing only if the target file doesn't already exist (C11)
+    output_file = fopen(output_path, "wx");
+    if (!output_file) {
+      if (errno == EEXIST)
+        printf("Error: Output file '%s' already exists\n", output_path);
+      else
+        perror(output_path);
+      continue;
+    }
+
+    break; // valid input
   }
 
   markdown_output = strcasecmp(out_ext, ".md") == 0;
@@ -228,9 +265,19 @@ int main(int argc, char *argv[]) {
     cat_comments(path, output_file);
   }
 
-  printf("\n================\n");
-  printf("Successfully saved to %s\n", output_path);
-
   fclose(output_file);
+  printf("================\n");
+
+  if (written_files == 0) {
+    remove(output_path);
+    printf("No comments found. Output file was not saved.\n");
+  } else {
+    printf("Successfully saved output to %s\n", output_path);
+  }
+
+  if (path_error) {
+    printf("Finished with errors (see above)\n");
+    return 1;
+  }
   return 0;
 }
